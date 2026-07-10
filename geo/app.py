@@ -144,10 +144,7 @@ if generate_button:
                         for reason in route["reasons"]:
                             st.write(f"• {reason}")
 
-                        st.write("Why Strida selected it:")
-
-                        for reason in route["reasons"]:
-                            st.write(f"• {reason}")
+                      
 
                         # The best route is already displayed
                         # on the large map above.
