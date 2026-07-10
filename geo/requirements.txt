@@ -8,3 +8,4 @@ shapely
 pandas
 numpy
 requests
+scikit-learn
