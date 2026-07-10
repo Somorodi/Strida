@@ -9,11 +9,11 @@ from route_generation import (
 
 st.set_page_config(
     page_title="Strida MVP",
-    page_icon="🏃",
+    page_icon="🧭",
     layout="wide"
 )
 
-st.title("🏃 Strida")
+st.title("Strida")
 
 st.write(
     "Enter a starting address and target distance "
