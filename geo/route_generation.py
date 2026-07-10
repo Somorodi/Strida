@@ -3,9 +3,66 @@ import random
 import osmnx as ox
 import networkx as nx
 import folium
-
+from xml.etree.ElementTree import Element, SubElement, tostring
+from xml.dom import minidom
 
 METERS_PER_MILE = 1609.34
+
+def route_to_gpx(G, route_path, route_name="Strida Route"):
+    """
+    Convert an OSMnx route path into a GPX XML string.
+
+    Parameters:
+        G: OSMnx/NetworkX graph
+        route_path: Ordered list of node IDs
+        route_name: Name displayed in Garmin or another GPS app
+
+    Returns:
+        A UTF-8 encoded GPX file as bytes.
+    """
+
+    gpx = Element(
+        "gpx",
+        {
+            "version": "1.1",
+            "creator": "Strida",
+            "xmlns": "http://www.topografix.com/GPX/1/1",
+            "xmlns:xsi": "http://www.w3.org/2001/XMLSchema-instance",
+            "xsi:schemaLocation": (
+                "http://www.topografix.com/GPX/1/1 "
+                "http://www.topografix.com/GPX/1/1/gpx.xsd"
+            ),
+        },
+    )
+
+    metadata = SubElement(gpx, "metadata")
+    SubElement(metadata, "name").text = route_name
+
+    route_element = SubElement(gpx, "rte")
+    SubElement(route_element, "name").text = route_name
+
+    for node_id in route_path:
+        node = G.nodes[node_id]
+
+        latitude = node["y"]
+        longitude = node["x"]
+
+        SubElement(
+            route_element,
+            "rtept",
+            {
+                "lat": str(latitude),
+                "lon": str(longitude),
+            },
+        )
+
+    rough_xml = tostring(gpx, encoding="utf-8")
+    formatted_xml = minidom.parseString(rough_xml).toprettyxml(
+        indent="  ",
+        encoding="UTF-8",
+    )
+
+    return formatted_xml
 
 def get_edge_length(G, u, v):
     """
@@ -127,7 +184,10 @@ def generate_loop_candidates(
         cutoff=target_meters,
         weight="length"
     )
-
+    
+    
+    
+    
     # For a triangular loop, waypoints should generally be somewhere
     # between roughly 15% and 45% of the target distance from the start.
     minimum_waypoint_distance = target_meters * 0.15
@@ -502,6 +562,6 @@ def create_strida_routes(
         popup=f"Starting point: {address}"
     ).add_to(route_map)
 
-    return route_map, scored_routes, cycle_count
+    return route_map, scored_routes, cycle_count, G
 
 

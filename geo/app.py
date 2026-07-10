@@ -1,7 +1,10 @@
 import streamlit as st
 from streamlit_folium import st_folium
 
-from route_generation import create_strida_routes
+from route_generation import (
+    create_strida_routes,
+    route_to_gpx
+)
 
 
 st.set_page_config(
@@ -60,7 +63,7 @@ if generate_button:
                 "Finding the address, downloading the walking "
                 "network, and generating loops..."
             ):
-                route_map, routes, cycle_count = (
+                route_map, routes, cycle_count, G = (
                     create_strida_routes(
                         address=address.strip(),
                         target_miles=target_miles,
@@ -138,6 +141,27 @@ if generate_button:
 
                         for reason in route["reasons"]:
                             st.write(f"• {reason}")
+                        
+                        gpx_data = route_to_gpx(
+                            G=G,
+                            route_path=route["path"],
+                            route_name=(
+                                f"Strida Route {index + 1} "
+                                f"- {route['length_miles']:.2f} miles"
+                            )
+                        )
+
+                        st.download_button(
+                            label=f"Download {route_name} as GPX",
+                            data=gpx_data,
+                            file_name=(
+                                f"strida_route_{index + 1}_"
+                                f"{route['length_miles']:.2f}_miles.gpx"
+                            ),
+                            mime="application/gpx+xml",
+                            key=f"gpx_download_{index}",
+                            use_container_width=True
+                        )    
 
         except Exception as error:
             st.error(
