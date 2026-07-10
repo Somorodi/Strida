@@ -144,48 +144,53 @@ if generate_button:
                         for reason in route["reasons"]:
                             st.write(f"• {reason}")
 
-                            with st.expander(f"Preview {route_name}"):
+                        st.write("Why Strida selected it:")
 
+                        for reason in route["reasons"]:
+                            st.write(f"• {reason}")
+
+                        # The best route is already displayed
+                        # on the large map above.
+                        if index > 0:
+                            with st.expander(
+                                f"Preview {route_name}"
+                            ):
                                 route_coordinates = [
                                     (
                                         G.nodes[node]["y"],
                                         G.nodes[node]["x"]
                                     )
                                     for node in route["path"]
-                            ]
+                                ]
 
-                            preview_map = folium.Map(
-                                location=route_coordinates[0],
-                                zoom_start=15
-                            )
-
-                            folium.PolyLine(
-                                route_coordinates,
-                                 weight=7,
-                                color="green",
-                                tooltip=(
-                                    f"{route['length_miles']:.2f} miles | "
-                                    f"Score {route['score']}"
+                                preview_map = folium.Map(
+                                    location=route_coordinates[0],
+                                    zoom_start=15
                                 )
-                            ).add_to(preview_map)
 
-                            folium.Marker(
-                                route_coordinates[0],
-                                 tooltip="Start and finish",
-                                icon=folium.Icon(
-                                color="green",
-                                icon="play"
-                            )
-                        ).add_to(preview_map)
+                                folium.PolyLine(
+                                    route_coordinates,
+                                    weight=7,
+                                    color="green",
+                                    tooltip=(
+                                        f"{route['length_miles']:.2f} miles | "
+                                        f"Score {route['score']}"
+                                    )
+                                ).add_to(preview_map)
 
-                        st_folium(
-                            preview_map,
-                            width=None,
-                            height=450,
-                            returned_objects=[],
-                            key=f"route_preview_{index}"
-                        )
-                        
+                                folium.Marker(
+                                    route_coordinates[0],
+                                    tooltip="Start and finish"
+                                ).add_to(preview_map)
+
+                                st_folium(
+                                    preview_map,
+                                    width=None,
+                                    height=450,
+                                    returned_objects=[],
+                                    key=f"route_preview_{index}"
+                                )
+
                         gpx_data = route_to_gpx(
                             G=G,
                             route_path=route["path"],
@@ -196,7 +201,9 @@ if generate_button:
                         )
 
                         st.download_button(
-                            label=f"Download {route_name} as GPX",
+                            label=(
+                                f"Download {route_name} as GPX"
+                            ),
                             data=gpx_data,
                             file_name=(
                                 f"strida_route_{index + 1}_"
@@ -205,8 +212,7 @@ if generate_button:
                             mime="application/gpx+xml",
                             key=f"gpx_download_{index}",
                             use_container_width=True
-                        )    
-
+                        )
         except Exception as error:
             st.error(
                 "Strida encountered an error while "
@@ -220,3 +226,17 @@ else:
         "Adjust the settings in the sidebar, "
         "then select Generate routes."
     )
+
+    st.divider()
+
+st.subheader("Share feedback")
+
+st.write(
+    "Tested a route? Tell me what worked and what needs improvement."
+)
+
+st.link_button(
+    "Open feedback form",
+    "https://forms.gle/1MNstx5uq9fuFFst9",
+    use_container_width=True
+)
