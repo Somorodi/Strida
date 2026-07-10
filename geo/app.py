@@ -62,7 +62,7 @@ if generate_button:
     else:
         try:
             with st.spinner(
-                "Finding the address, downloading the walking "
+                "Finding the address, downloading the running "
                 "network, and generating loops..."
             ):
                 route_map, routes, cycle_count, G = (
