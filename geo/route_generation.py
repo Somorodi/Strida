@@ -396,7 +396,7 @@ def generate_routes(
     return distinct_routes[:number_of_routes]
 
 def create_strida_routes(
-    start_point,
+    address,
     target_miles,
     graph_radius=2500,
     number_of_routes=5
@@ -405,8 +405,8 @@ def create_strida_routes(
     Generate Strida loop routes and return a Folium map.
 
     Args:
-        start_point:
-            Tuple containing latitude and longitude.
+        address:
+            Starting street address.
 
         target_miles:
             Requested running distance.
@@ -420,6 +420,11 @@ def create_strida_routes(
     Returns:
         folium.Map, list of routes, cycle count
     """
+    try:
+        start_point = ox.geocode(address)
+    except Exception:
+        raise ValueError(f"Could not find address: {address}")
+    
     target_meters = target_miles * METERS_PER_MILE
 
     G = ox.graph_from_point(
@@ -460,18 +465,16 @@ def create_strida_routes(
         similarity_threshold=0.80
     )
 
+    if not scored_routes:
+        raise ValueError(
+            "No valid routes were found. Try increasing graph_radius "
+            "or changing the requested distance."
+        )
+
     route_map = folium.Map(
         location=start_point,
         zoom_start=15
     )
-
-    route_colors = [
-        "green",
-        "blue",
-        "purple",
-        "orange",
-        "red"
-    ]
 
     best_route = scored_routes[0]
 
@@ -484,14 +487,21 @@ def create_strida_routes(
         coords.append((latitude, longitude))
 
     folium.PolyLine(
-    coords,
-    weight=8,
-    color="green",
-    tooltip=(
-        f"{best_route['length_miles']:.2f} miles | "
-        f"Score {best_route['score']}"
-    )
-).add_to(route_map)
+        coords,
+        weight=8,
+        color="green",
+        tooltip=(
+            f"{best_route['length_miles']:.2f} miles | "
+            f"Score {best_route['score']}"
+        )
+    ).add_to(route_map)
+
+    folium.Marker(
+        location=start_point,
+        tooltip=address,
+        popup=f"Starting point: {address}"
+    ).add_to(route_map)
 
     return route_map, scored_routes, cycle_count
+
 
