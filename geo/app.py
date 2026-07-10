@@ -1,5 +1,7 @@
+import folium
 import streamlit as st
 from streamlit_folium import st_folium
+
 
 from route_generation import (
     create_strida_routes,
@@ -141,6 +143,48 @@ if generate_button:
 
                         for reason in route["reasons"]:
                             st.write(f"• {reason}")
+
+                            with st.expander(f"Preview {route_name}"):
+
+                                route_coordinates = [
+                                    (
+                                        G.nodes[node]["y"],
+                                        G.nodes[node]["x"]
+                                    )
+                                    for node in route["path"]
+                            ]
+
+                            preview_map = folium.Map(
+                                location=route_coordinates[0],
+                                zoom_start=15
+                            )
+
+                            folium.PolyLine(
+                                route_coordinates,
+                                 weight=7,
+                                color="green",
+                                tooltip=(
+                                    f"{route['length_miles']:.2f} miles | "
+                                    f"Score {route['score']}"
+                                )
+                            ).add_to(preview_map)
+
+                            folium.Marker(
+                                route_coordinates[0],
+                                 tooltip="Start and finish",
+                                icon=folium.Icon(
+                                color="green",
+                                icon="play"
+                            )
+                        ).add_to(preview_map)
+
+                        st_folium(
+                            preview_map,
+                            width=None,
+                            height=450,
+                            returned_objects=[],
+                            key=f"route_preview_{index}"
+                        )
                         
                         gpx_data = route_to_gpx(
                             G=G,
