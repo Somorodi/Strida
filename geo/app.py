@@ -27,7 +27,8 @@ with st.sidebar:
 
     address = st.text_input(
         "Starting address",
-        placeholder="123 Main St, Stafford, VA"
+        placeholder="123 Main St, Stafford, VA 22554",
+        help="Use a street address with city, state and ZIP code. Latitude, longitude also works."
     )
 
     target_miles = st.number_input(
