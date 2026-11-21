@@ -1,5 +1,8 @@
 import math
 import random
+from time import monotonic
+
+from requests.exceptions import RequestException
 import osmnx as ox
 import networkx as nx
 import folium
@@ -7,6 +10,18 @@ from xml.etree.ElementTree import Element, SubElement, tostring
 from xml.dom import minidom
 
 METERS_PER_MILE = 1609.34
+ox.settings.requests_timeout = 30
+ox.settings.use_cache = True
+
+
+def stop_on_busy_response(response, *args, **kwargs):
+    # OSMnx otherwise retries these responses recursively.
+    if response.status_code in (429, 504):
+        response.raise_for_status()
+    return response
+
+
+ox.settings.requests_kwargs = {"hooks": {"response": stop_on_busy_response}}
 
 def route_to_gpx(G, route_path, route_name="Strida Route"):
     """
@@ -167,7 +182,8 @@ def generate_loop_candidates(
     max_candidates=30,
     distance_tolerance=0.50,
     max_repeated_edge_ratio=0.50,
-    random_seed=42
+    random_seed=42,
+    time_budget=15
 ):
     """
     Generate loop candidates using two intermediate waypoints.
@@ -176,6 +192,7 @@ def generate_loop_candidates(
         start -> waypoint A -> waypoint B -> start
     """
     random_generator = random.Random(random_seed)
+    deadline = monotonic() + time_budget
 
     # Calculate network distance from the start to every reachable node.
     distances_from_start = nx.single_source_dijkstra_path_length(
@@ -210,6 +227,8 @@ def generate_loop_candidates(
     seen_paths = set()
 
     for _ in range(attempts):
+        if monotonic() >= deadline:
+            break
         waypoint_a, waypoint_b = random_generator.sample(
             waypoint_nodes,
             2
@@ -459,7 +478,8 @@ def create_strida_routes(
     address,
     target_miles,
     graph_radius=2500,
-    number_of_routes=5
+    number_of_routes=5,
+    progress=None
 ):
     """
     Generate Strida loop routes and return a Folium map.
@@ -480,24 +500,34 @@ def create_strida_routes(
     Returns:
         folium.Map, list of routes, cycle count
     """
+    if progress:
+        progress("Finding your start address…")
     try:
         start_point = ox.geocode(address)
-    except Exception:
-        raise ValueError(f"Could not find address: {address}")
+    except RequestException as error:
+        raise ValueError("The address lookup service did not respond. Try again shortly.") from error
+    except (ValueError, ox._errors.InsufficientResponseError) as error:
+        raise ValueError("Could not find the start address. Try adding the city or ZIP code.") from error
     
     target_meters = target_miles * METERS_PER_MILE
 
-    G = ox.graph_from_point(
-        start_point,
-        dist=graph_radius,
-        network_type="walk",
-        simplify=True
-    )
+    if progress:
+        progress("Downloading walkable streets from OpenStreetMap…")
+    try:
+        G = ox.graph_from_point(
+            start_point,
+            dist=graph_radius,
+            network_type="walk",
+            simplify=True
+        )
+    except (RequestException, ox._errors.ResponseStatusCodeError) as error:
+        raise ValueError(
+            "OpenStreetMap could not provide the street network. Try again shortly or use a smaller search radius."
+        ) from error
+    if progress:
+        progress("Searching for running loops…")
 
-    G = ox.distance.add_edge_lengths(G)
-
-    nodes, edges = ox.graph_to_gdfs(G)
-
+    # OSMnx preserves the lengths of original segments when simplifying paths.
     simple_graph = nx.Graph(G)
     cycles = nx.cycle_basis(simple_graph)
     cycle_count = len(cycles)
