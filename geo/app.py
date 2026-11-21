@@ -1,16 +1,22 @@
+import logging
+
 import folium
 import streamlit as st
 from streamlit_folium import st_folium
 
 
 from route_generation import (
+    FOSSGIS_FOOT_URL,
+    OSRM_FOOT_URL,
     create_strida_routes,
+    route_coordinates,
     route_to_gpx
 )
 
+logger = logging.getLogger(__name__)
 
 st.set_page_config(
-    page_title="Strida MVP",
+    page_title="Strida",
     page_icon="🧭",
     layout="wide"
 )
@@ -28,7 +34,8 @@ with st.sidebar:
     address = st.text_input(
         "Starting address",
         placeholder="123 Main St, Stafford, VA 22554",
-        help="Use a street address with city, state and ZIP code. Latitude, longitude also works."
+        help="Enter a public starting address with the city and postal code. Latitude and longitude also work.",
+        key="starting_address"
     )
 
     target_miles = st.number_input(
@@ -50,7 +57,8 @@ with st.sidebar:
     generate_button = st.button(
         "Generate routes",
         type="primary",
-        use_container_width=True
+        width="stretch",
+        key="generate_routes"
     )
 
 
@@ -73,9 +81,9 @@ if generate_button:
             )
         except ValueError as error:
             st.error(str(error))
-        except Exception as error:
+        except Exception:
+            logger.exception("Route generation failed")
             st.error("Strida encountered an error while generating the route.")
-            st.exception(error)
         finally:
             status.empty()
 
@@ -83,10 +91,16 @@ if generate_button:
 results = st.session_state.get("route_results")
 if results is not None:
     route_map, routes, cycle_count, G = results
-    st.write(
-        f"Network cycles available: "
-        f"**{cycle_count}**"
-    )
+    if cycle_count is None:
+        routing = "Routing by [OSRM on the FOSSGIS servers](https://routing.openstreetmap.de/about.html)" if (
+            OSRM_FOOT_URL == FOSSGIS_FOOT_URL
+        ) else "Routing by [OSRM](https://project-osrm.org/)"
+        st.caption(
+            f"{routing} using [OpenStreetMap data](https://www.openstreetmap.org/copyright). "
+            "[Fix the map](https://www.openstreetmap.org/fixthemap)."
+        )
+    else:
+        st.write(f"Network cycles available: **{cycle_count}**")
 
     if not routes:
         st.warning(
@@ -104,7 +118,7 @@ if results is not None:
             width=None,
             height=650,
             returned_objects=[],
-            key="best_route_map"
+            key="routes_map"
         )
 
         st.subheader("Route options")
@@ -156,27 +170,19 @@ if results is not None:
 
 
 
-                # The best route is already displayed
-                # on the large map above.
                 if index > 0:
                     with st.expander(
                         f"Preview {route_name}"
                     ):
-                        route_coordinates = [
-                            (
-                                G.nodes[node]["y"],
-                                G.nodes[node]["x"]
-                            )
-                            for node in route["path"]
-                        ]
+                        coordinates = route_coordinates(G, route["path"])
 
                         preview_map = folium.Map(
-                            location=route_coordinates[0],
+                            location=coordinates[0],
                             zoom_start=15
                         )
 
                         folium.PolyLine(
-                            route_coordinates,
+                            coordinates,
                             weight=7,
                             color="green",
                             tooltip=(
@@ -186,9 +192,10 @@ if results is not None:
                         ).add_to(preview_map)
 
                         folium.Marker(
-                            route_coordinates[0],
+                            coordinates[0],
                             tooltip="Start and finish"
                         ).add_to(preview_map)
+                        preview_map.fit_bounds(preview_map.get_bounds())
 
                         st_folium(
                             preview_map,
@@ -218,7 +225,7 @@ if results is not None:
                     ),
                     mime="application/gpx+xml",
                     key=f"gpx_download_{index}",
-                    use_container_width=True
+                    width="stretch"
                 )
 
 elif not generate_button:
@@ -238,5 +245,5 @@ st.write(
 st.link_button(
     "Open feedback form",
     "https://forms.gle/1MNstx5uq9fuFFst9",
-    use_container_width=True
+    width="stretch"
 )

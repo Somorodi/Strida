@@ -1,7 +1,12 @@
+import logging
 import math
+import os
 import random
 import re
-from time import monotonic
+from functools import lru_cache
+from pathlib import Path
+from threading import Lock
+from time import monotonic, sleep
 
 import requests
 from requests.exceptions import RequestException
@@ -12,18 +17,184 @@ from xml.etree.ElementTree import Element, SubElement, tostring
 from xml.dom import minidom
 
 METERS_PER_MILE = 1609.34
+BACKUP_OVERPASS_URL = "https://overpass.private.coffee/api"
+FOSSGIS_FOOT_URL = "https://routing.openstreetmap.de/routed-foot/route/v1/driving"
+OSRM_FOOT_URL = os.environ.get("STRIDA_OSRM_FOOT_URL", FOSSGIS_FOOT_URL).rstrip("/")
+USER_AGENT = "Strida (https://github.com/Somorodi/Strida)"
+CACHE_DIR = Path(__file__).resolve().parent / "cache"
+DEFAULT_OSM_PBF = CACHE_DIR.parent / "stafford-walkable.osm.pbf"
+overpass_lock = Lock()
+osrm_lock = Lock()
+geocode_lock = Lock()
+last_osrm_request = 0.0
+logger = logging.getLogger(__name__)
 ox.settings.requests_timeout = 30
 ox.settings.use_cache = True
+ox.settings.cache_folder = CACHE_DIR
+ox.settings.http_user_agent = USER_AGENT
+ox.settings.nominatim_url = os.environ.get("STRIDA_NOMINATIM_URL", ox.settings.nominatim_url).rstrip("/")
+ox.settings.overpass_url = os.environ.get("STRIDA_OVERPASS_URL", ox.settings.overpass_url).rstrip("/")
 
 
 def stop_on_busy_response(response, *args, **kwargs):
     # OSMnx otherwise retries these responses recursively.
-    if response.status_code in (429, 504):
+    if response.status_code in (429, 502, 504):
         response.raise_for_status()
     return response
 
 
 ox.settings.requests_kwargs = {"hooks": {"response": stop_on_busy_response}}
+
+
+@lru_cache(maxsize=1)
+def read_walkable_extract(path, modified_at):
+    return ox.graph.graph_from_pbf(path, network_type="walk", retain_all=True)
+
+
+def load_local_network(start_point, radius, progress=None):
+    extract = os.environ.get("STRIDA_OSM_PBF")
+    path = Path(extract).expanduser().resolve() if extract else DEFAULT_OSM_PBF
+    if extract and not path.is_file():
+        raise ValueError("The configured OpenStreetMap extract file could not be found.")
+    if path.is_file():
+        if progress:
+            progress("Loading walkable streets from the local OpenStreetMap extract…")
+        graph = read_walkable_extract(path, path.stat().st_mtime_ns)
+        bounds = ox.utils_geo.bbox_from_point(start_point, dist=radius)
+        try:
+            local_graph = ox.truncate.truncate_graph_bbox(graph, bounds)
+        except ValueError:
+            local_graph = None
+        if local_graph is not None and local_graph.number_of_edges():
+            local_graph = ox.truncate.largest_component(local_graph)
+            _, start_distance = ox.distance.nearest_nodes(
+                local_graph, X=start_point[1], Y=start_point[0], return_dist=True
+            )
+            if start_distance <= 500:
+                return local_graph
+        if extract:
+            raise ValueError("The local OpenStreetMap extract has no walkable connections in this search area.")
+
+
+def load_walkable_network(start_point, radius, progress=None):
+    if progress:
+        progress("Downloading walkable streets from OpenStreetMap…")
+    # OSMnx uses process-wide settings, so keep the endpoint switch local to one request.
+    with overpass_lock:
+        primary_url = ox.settings.overpass_url
+        primary_rate_limit = ox.settings.overpass_rate_limit
+        endpoints = (primary_url,) if os.environ.get("STRIDA_OVERPASS_URL") else (
+            primary_url, BACKUP_OVERPASS_URL
+        )
+        try:
+            for url in dict.fromkeys(endpoints):
+                ox.settings.overpass_url = url
+                # Private.coffee does not use Overpass slot limits.
+                ox.settings.overpass_rate_limit = primary_rate_limit and url != BACKUP_OVERPASS_URL
+                try:
+                    return ox.graph_from_point(start_point, dist=radius, network_type="walk")
+                except (RequestException, ox._errors.ResponseStatusCodeError,
+                        ox._errors.InsufficientResponseError) as error:
+                    last_error = error
+                    logger.warning("Overpass request to %s failed: %s", url, type(error).__name__)
+        finally:
+            ox.settings.overpass_url = primary_url
+            ox.settings.overpass_rate_limit = primary_rate_limit
+
+    if isinstance(last_error, ox._errors.InsufficientResponseError):
+        raise ValueError(
+            "No usable walkable street network was returned. Try a nearby starting point or a larger search radius."
+        ) from last_error
+    raise ValueError(
+        "The online street network services are unavailable. Configure a local OpenStreetMap extract to generate routes offline."
+    ) from last_error
+
+
+@lru_cache(maxsize=128)
+def request_pedestrian_loop(points):
+    global last_osrm_request
+    locations = ";".join(f"{lon:.6f},{lat:.6f}" for lat, lon in points)
+    with osrm_lock:
+        sleep(max(0, 1.05 - (monotonic() - last_osrm_request)))
+        last_osrm_request = monotonic()
+        response = requests.get(
+            f"{OSRM_FOOT_URL}/{locations}",
+            params={"geometries": "geojson", "overview": "full",
+                    "radiuses": "100;100;100;100"},
+            headers={"User-Agent": USER_AGENT},
+            timeout=(3, 7),
+        )
+    data = response.json()
+    if data.get("code") in {"NoRoute", "NoSegment"}:
+        return None
+    response.raise_for_status()
+    return data["routes"][0]
+
+
+def get_pedestrian_candidates(start, radius, target_meters):
+    graph = nx.MultiDiGraph()
+    candidates = []
+    lat, lon = start
+    west, south, east, north = ox.utils_geo.bbox_from_point(start, dist=radius)
+    waypoint_distance = min(radius * 0.8, target_meters / 4)
+    angular_distance = waypoint_distance / 6_371_009
+
+    def waypoint(degrees):
+        bearing = math.radians(degrees)
+        start_lat = math.radians(lat)
+        end_lat = math.asin(math.sin(start_lat) * math.cos(angular_distance)
+                            + math.cos(start_lat) * math.sin(angular_distance) * math.cos(bearing))
+        end_lon = lon + math.degrees(math.atan2(
+            math.sin(bearing) * math.sin(angular_distance) * math.cos(start_lat),
+            math.cos(angular_distance) - math.sin(start_lat) * math.sin(end_lat),
+        ))
+        return math.degrees(end_lat), (end_lon + 180) % 360 - 180
+
+    for bearing in range(0, 360, 60):
+        try:
+            result = request_pedestrian_loop(
+                (start, waypoint(bearing), waypoint(bearing + 75), start)
+            )
+            if result is None:
+                continue
+            distance = result["distance"]
+            path = [(x, y) for x, y in result["geometry"]["coordinates"]]
+        except (RequestException, KeyError, IndexError, TypeError, ValueError) as error:
+            logger.warning("Pedestrian routing request failed: %s", type(error).__name__)
+            break
+        if (len(path) < 4 or path[0] != path[-1]
+                or not 0.5 * target_meters <= distance <= 1.5 * target_meters
+                or any(not (west <= x <= east and south <= y <= north) for x, y in path)):
+            continue
+        repetition = repeated_edge_ratio(path)
+        if repetition > 0.5:
+            continue
+        graph.add_nodes_from((point, {"x": point[0], "y": point[1]}) for point in path)
+        graph.add_edges_from(
+            (u, v, {"length": ox.distance.great_circle(u[1], u[0], v[1], v[0])})
+            for u, v in zip(path, path[1:])
+        )
+        candidates.append({
+            "path": path,
+            "length_meters": distance,
+            "repeated_edge_ratio": repetition,
+        })
+    return graph, candidates
+
+
+def route_coordinates(G, path):
+    coordinates = [(G.nodes[path[0]]["y"], G.nodes[path[0]]["x"])]
+    for u, v in zip(path, path[1:]):
+        edge = min(G[u][v].values(), key=lambda data: data["length"])
+        geometry = edge.get("geometry")
+        if geometry is None:
+            coordinates.append((G.nodes[v]["y"], G.nodes[v]["x"]))
+            continue
+        segment = [(y, x) for x, y in geometry.coords]
+        if segment[0] != coordinates[-1]:
+            segment.reverse()
+        coordinates.extend(segment[1:])
+    return coordinates
 
 
 def resolve_start(address):
@@ -36,7 +207,8 @@ def resolve_start(address):
         raise ValueError("Enter latitude between -90 and 90 and longitude between -180 and 180.")
 
     try:
-        return ox.geocode(address)
+        with geocode_lock:
+            return ox.geocode(address)
     except (RequestException, ValueError, ox._errors.InsufficientResponseError,
             ox._errors.ResponseStatusCodeError) as primary_error:
         if re.search(r"\b[A-Z]{2}\s+\d{5}(?:-\d{4})?(?:\s*,?\s*(?:US|USA))?$", address, re.I):
@@ -259,14 +431,20 @@ def generate_loop_candidates(
 
     candidate_routes = []
     seen_paths = set()
+    tried_waypoints = set()
+    possible_pairs = len(waypoint_nodes) * (len(waypoint_nodes) - 1)
 
     for _ in range(attempts):
-        if monotonic() >= deadline:
+        if monotonic() >= deadline or len(tried_waypoints) == possible_pairs:
             break
         waypoint_a, waypoint_b = random_generator.sample(
             waypoint_nodes,
             2
         )
+        pair = (waypoint_a, waypoint_b)
+        if pair in tried_waypoints:
+            continue
+        tried_waypoints.add(pair)
 
         angle_a = node_angle(G, start_node, waypoint_a)
         angle_b = node_angle(G, start_node, waypoint_b)
@@ -540,42 +718,30 @@ def create_strida_routes(
     
     target_meters = target_miles * METERS_PER_MILE
 
-    if progress:
-        progress("Downloading walkable streets from OpenStreetMap…")
-    try:
-        G = ox.graph_from_point(
-            start_point,
-            dist=graph_radius,
-            network_type="walk",
-            simplify=True
+    G = load_local_network(start_point, graph_radius, progress=progress)
+    candidate_routes = []
+    cycle_count = None
+    if G is None:
+        if progress:
+            progress("Finding pedestrian loops on OpenStreetMap…")
+        G, candidate_routes = get_pedestrian_candidates(start_point, graph_radius, target_meters)
+        if not candidate_routes:
+            G = load_walkable_network(start_point, graph_radius, progress=progress)
+
+    if not candidate_routes:
+        if progress:
+            progress("Searching for running loops…")
+        cycle_count = len(nx.cycle_basis(nx.Graph(G)))
+        start_node = ox.distance.nearest_nodes(G, X=start_point[1], Y=start_point[0])
+        candidate_routes = generate_loop_candidates(
+            G=G,
+            start_node=start_node,
+            target_meters=target_meters,
+            attempts=5000,
+            distance_tolerance=0.50,
+            max_repeated_edge_ratio=0.50,
+            random_seed=42
         )
-    except (RequestException, ox._errors.ResponseStatusCodeError) as error:
-        raise ValueError(
-            "OpenStreetMap could not provide the street network. Try again shortly or use a smaller search radius."
-        ) from error
-    if progress:
-        progress("Searching for running loops…")
-
-    # OSMnx preserves the lengths of original segments when simplifying paths.
-    simple_graph = nx.Graph(G)
-    cycles = nx.cycle_basis(simple_graph)
-    cycle_count = len(cycles)
-
-    start_node = ox.distance.nearest_nodes(
-        G,
-        X=start_point[1],
-        Y=start_point[0]
-    )
-
-    candidate_routes = generate_loop_candidates(
-        G=G,
-        start_node=start_node,
-        target_meters=target_meters,
-        attempts=5000,
-        distance_tolerance=0.50,
-        max_repeated_edge_ratio=0.50,
-        random_seed=42
-    )
 
     scored_routes = generate_routes(
         candidate_routes=candidate_routes,
@@ -595,31 +761,26 @@ def create_strida_routes(
         zoom_start=15
     )
 
-    best_route = scored_routes[0]
-
-    coords = []
-
-    for node in best_route["path"]:
-        latitude = G.nodes[node]["y"]
-        longitude = G.nodes[node]["x"]
-
-        coords.append((latitude, longitude))
-
-    folium.PolyLine(
-        coords,
-        weight=8,
-        color="green",
-        tooltip=(
-            f"{best_route['length_miles']:.2f} miles | "
-            f"Score {best_route['score']}"
-        )
-    ).add_to(route_map)
+    colors = ("green", "blue", "purple", "darkorange", "darkred")
+    for index in reversed(range(len(scored_routes))):
+        route = scored_routes[index]
+        name = "Best route" if index == 0 else f"Route {index + 1}"
+        coordinates = route_coordinates(G, route["path"])
+        layer = folium.FeatureGroup(name=name).add_to(route_map)
+        folium.PolyLine(
+            coordinates,
+            weight=6 if index == 0 else 4,
+            color=colors[index % len(colors)],
+            tooltip=f"{name} | {route['length_miles']:.2f} miles | Score {route['score']}"
+        ).add_to(layer)
 
     folium.Marker(
         location=start_point,
         tooltip=address,
         popup=f"Starting point: {address}"
     ).add_to(route_map)
+    folium.LayerControl(collapsed=False).add_to(route_map)
+    route_map.fit_bounds(route_map.get_bounds())
 
     return route_map, scored_routes, cycle_count, G
 
