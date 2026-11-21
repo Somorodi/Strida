@@ -1,7 +1,9 @@
 import math
 import random
+import re
 from time import monotonic
 
+import requests
 from requests.exceptions import RequestException
 import osmnx as ox
 import networkx as nx
@@ -22,6 +24,38 @@ def stop_on_busy_response(response, *args, **kwargs):
 
 
 ox.settings.requests_kwargs = {"hooks": {"response": stop_on_busy_response}}
+
+
+def resolve_start(address):
+    address = address.strip()
+    coordinates = re.fullmatch(r"([+-]?\d+(?:\.\d+)?),\s*([+-]?\d+(?:\.\d+)?)", address)
+    if coordinates:
+        latitude, longitude = map(float, coordinates.groups())
+        if abs(latitude) <= 90 and abs(longitude) <= 180:
+            return latitude, longitude
+        raise ValueError("Enter latitude between -90 and 90 and longitude between -180 and 180.")
+
+    try:
+        return ox.geocode(address)
+    except (RequestException, ValueError, ox._errors.InsufficientResponseError,
+            ox._errors.ResponseStatusCodeError) as primary_error:
+        if re.search(r"\b[A-Z]{2}\s+\d{5}(?:-\d{4})?(?:\s*,?\s*(?:US|USA))?$", address, re.I):
+            try:
+                response = requests.get(
+                    "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress",
+                    params={"address": address, "benchmark": "Public_AR_Current", "format": "json"},
+                    timeout=8
+                )
+                response.raise_for_status()
+                matches = response.json()["result"]["addressMatches"]
+                if matches:
+                    point = matches[0]["coordinates"]
+                    return float(point["y"]), float(point["x"])
+            except (RequestException, KeyError, TypeError, ValueError) as error:
+                raise ValueError("The address lookup services are unavailable. Try again shortly or enter coordinates.") from error
+        if isinstance(primary_error, (RequestException, ox._errors.ResponseStatusCodeError)):
+            raise ValueError("Address lookup is unavailable. For a U.S. address, include the state and ZIP code to try the backup service.") from primary_error
+        raise ValueError("Could not find that address. Include the city, state, and ZIP code where applicable.") from primary_error
 
 def route_to_gpx(G, route_path, route_name="Strida Route"):
     """
@@ -502,12 +536,7 @@ def create_strida_routes(
     """
     if progress:
         progress("Finding your start address…")
-    try:
-        start_point = ox.geocode(address)
-    except RequestException as error:
-        raise ValueError("The address lookup service did not respond. Try again shortly.") from error
-    except (ValueError, ox._errors.InsufficientResponseError) as error:
-        raise ValueError("Could not find the start address. Try adding the city or ZIP code.") from error
+    start_point = resolve_start(address)
     
     target_meters = target_miles * METERS_PER_MILE
 
